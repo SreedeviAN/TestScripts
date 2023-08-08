@@ -3,6 +3,8 @@
 64c849c2fe42d83a225bd8c4
 64c84c20fe42d83a225bd8e1
 
+st2 run ntt_itsm.itsm_table_getentries schema_name="sc_req_item" match_condition='number=RITM3466544'
+
 
 
 
