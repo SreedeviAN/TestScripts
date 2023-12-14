@@ -1,0 +1,31 @@
+cat servicenow_recurring_patch_validation_sensor.py
+#!/usr/bion/env python
+
+from st2reactor.sensor.base import PollingSensor
+from st2client.models.keyvalue import KeyValuePair
+import requests
+import ast
+import re
+import socket
+import os
+import pytz
+from datetime import datetime
+from st2client.client import Client
+import sys
+sys.path.append(os.path.dirname(os.path.realpath(__file__)) + '/../actions/lib')
+import base_action
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+__all__ = ['ServiceNowRecurringPatchValidationSensor']
+
+class ServiceNowRecurringPatchValidationSensor(PollingSensor):
+    def __init__(self, sensor_service, config=None, poll_interval=None):
+        super(ServiceNowRecurringPatchValidationSensor, self).__init__(sensor_service=sensor_service,
+                                                       config=config,
+                                                       poll_interval=poll_interval)
+        self._logger = self._sensor_service.get_logger(__name__)
+        self.base_action = base_action.BaseAction(config)
+
+    def setup(self):
+        self.sn_username = self._config['servicenow']['username']
