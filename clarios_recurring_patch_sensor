@@ -29,3 +29,302 @@ class ServiceNowRecurringPatchValidationSensor(PollingSensor):
 
     def setup(self):
         self.sn_username = self._config['servicenow']['username']
+                self.sn_password = self._config['servicenow']['password']
+        self.sn_url = self._config['servicenow']['url']
+        self.som_company_sys_id =  self.config['servicenow']['company_sys_id']
+        self.servicenow_headers = {'Content-type': 'application/json',
+                                   'Accept': 'application/json'}
+        self.st2_fqdn = socket.getfqdn()
+        st2_url = "https://{}/".format(self.st2_fqdn)
+        self.st2_client = Client(base_url=st2_url)
+
+    def poll(self):
+        # Query for all open change requests
+        #Change state values
+        #draft: 1
+        #review: 2
+        #planning in progress: 3
+        #pending approval: 4
+        #scheduled: 5
+        #implementation in progress: 6
+        #completed: 7
+        #closed: 8
+        #cancelled: 9
+        self._logger.info('In Servicenow change requests sensor')
+        sn_change_endpoint = '/api/now/table/change_request?sysparm_query=active=true^state=6'
+        #sn_change_endpoint = '/api/now/table/change_request?sysparm_query=active=true^change_state=5'
+        #sn_change_endpoint = sn_change_endpoint + '^company.sys_id='+self.som_company_sys_id
+        #company id for ARCOSA 75b38a74db8f97805e23ef92ca96194a
+        sn_change_endpoint = sn_change_endpoint + '^company.sys_id=5d89b80fdb9bb7005e23ef92ca96197d'
+        sn_change_endpoint = sn_change_endpoint + '^priority=3^ORpriority=4'
+        #sn_change_endpoint = sn_change_endpoint + '^sys_created_on>=javascript:gs.beginningOfYesterday()'
+        #sn_change_endpoint = sn_change_endpoint + "^start_dateON2022-07-20@javascript:gs.dateGenerate('2022-07-20','start')@javascript:gs.dateGenerate('2022-07-20','end')"
+        #sn_change_endpoint = sn_change_endpoint + '^end_dateRELATIVEGT@hour@ago@24^start_dateRELATIVELT@minute@ago@10'
+        sn_change_endpoint = sn_change_endpoint + '^end_dateRELATIVELT@hour@ahead@24^start_dateRELATIVEGT@hour@ago@24'
+        #sn_change_endpoint = sn_change_endpoint + "^sys_created_onBETWEENjavascript:gs.dateGenerate('2022-05-12','00:00:00')@javascript:gs.dateGenerate('2022-05-18','23:59:59')"
+        # Install SQL Server Patching or Install SQL Server (and) Patching
+        #sn_change_endpoint = sn_change_endpoint + '^descriptionLIKEAutomation Control Section'
+        sn_change_endpoint = sn_change_endpoint + '^descriptionLIKEAutoreboot'
+        sn_change_endpoint = sn_change_endpoint + '^short_descriptionLIKE[TR - Automation] Patching'
+        sn_change_endpoint = sn_change_endpoint + '&sysparm_fields=number,assignment_group,company,cmdb_ci,description,short_description,sys_id,priority,start_date, end_date, state'
+        sn_change_url = "https://{0}{1}".format(self.sn_url, sn_change_endpoint)
+        print("URL: {}".format(sn_change_url))
+        proxy1 = { 'https': 'http://proxy.clarios.com:443' }
+        sn_change_result = requests.request('GET', sn_change_url, auth=(self.sn_username, self.sn_password), headers=self.servicenow_headers, verify=False,proxies=proxy1)
+        sn_change_result.raise_for_status()
+        sn_change_requests = sn_change_result.json()['result']
+        self._logger.info(sn_change_requests)
+        self._logger.info('In Servicenow change requests sensor')
+        print("Servicenow change requests are: {}".format(sn_change_requests))
+        self.check_change_requests(sn_change_requests)
+
+    def check_change_requests(self, sn_change_requests):
+        self._logger.info("Inside Check_Change_Requests")
+        ''' Create a trigger to run cleanup on any open change requests that are not being processed '''
+        chg_st2_key = 'servicenow.change_requests_processing'
+        processing_chg_requests = self.st2_client.keys.get_by_name(chg_st2_key)
+        print("Processing change requests are: {}".format(processing_chg_requests))
+        processing_chg_requests = [] if processing_chg_requests is None else ast.literal_eval(processing_chg_requests.value)
+        print("Old change requests are: {}".format(processing_chg_requests))
+        chg_close_st2_key = 'servicenow.change_requests_processing_to_close'
+        processing_chg_requests_to_close = self.st2_client.keys.get_by_name(chg_close_st2_key)
+        #print("Processing change requests to close are: {}".format(processing_chg_requests_to_close))
+        processing_chg_requests_to_close = [] if processing_chg_requests_to_close is None else ast.literal_eval(processing_chg_requests_to_close.value)
+        #print("Old change requests are: {}".format(processing_chg_requests))
+        for chg in sn_change_requests:
+            #Skip any change request that are currnetly being processed
+            end_trigger_flag = 0 #Assigning End Trigger Flag to 0
+            email_flag = 0 #Assigning Email Flag to 0
+            incident_flag = 0
+            changekey = chg['number']
+            if chg['number'] in processing_chg_requests:
+                print('In continue')
+                #assign values to variables
+                if chg['end_date'] == "":
+                    print('End Time is blank')
+                    continue
+                planned_end_date = chg['end_date']
+                datesplit = planned_end_date.split('-')
+                year1 = datesplit[0]
+                month1 = datesplit[1]
+                day1 = datesplit[2].split(" ")[0]
+                hour1 = datesplit[2].split(" ")[1].split(":")[0]
+                minute1 = datesplit[2].split(" ")[1].split(":")[1]
+                print(year1, month1, day1)
+                planned_end_time = datetime(year=int(year1), month=int(month1), day=int(day1), hour=int(hour1), minute=int(minute1))
+                print(planned_end_date)
+                gmtcurrenttime = datetime.now(pytz.timezone('GMT'))
+                current_time_without_timezone = gmtcurrenttime.replace(tzinfo=None)
+                endtimediff = round((((planned_end_time - current_time_without_timezone).total_seconds())/3600),1)
+                print(endtimediff)
+                changekey = chg['number']
+                lasttriggertime = str(datetime.now())
+                if (endtimediff == 18 or endtimediff == 12 or endtimediff == 8 or endtimediff == 6 or endtimediff == 4 or endtimediff == 2 or (endtimediff <= 0.5 and endtimediff >= 0)):
+                    """print("checking when the last execution happened")
+                    lastexecutiontime = self.st2_client.keys.get_by_name(changekey)
+                    print(lastexecutiontime)
+                    if round((((current_time_without_timezone - lastexecutiontime).total_seconds())/3600),1) >= 0.2:"""
+                    self._logger.info('Processing change request:' + chg['number'])
+                    processing_chg_requests.append(chg['number'])
+                    """chg_str = str(processing_chg_requests)
+                    kvpchange = KeyValuePair(name=changekey, value=lasttriggertime)
+                    self.st2_client.keys.update(kvpchange)"""
+                    print("Check description")
+                    if 0 <= endtimediff <= 0.5 and changekey not in processing_chg_requests_to_close :
+                        print("reached last iteration")
+                        processing_chg_requests_to_close.append(changekey)
+                        chg_to_close = str(processing_chg_requests_to_close)
+                        kvp_close = KeyValuePair(name=chg_close_st2_key, value=chg_to_close )
+                        self.st2_client.keys.update(kvp_close)
+                        end_trigger_flag = 1
+                        self.check_description(chg, end_trigger_flag, email_flag, incident_flag)
+                    if endtimediff == 9:
+                        email_flag = 1
+                        incident_flag = 1
+                    if endtimediff == 12:
+                        email_flag = 1
+                    if endtimediff > 0.5 and changekey not in processing_chg_requests_to_close:
+                        self.check_description(chg, end_trigger_flag, email_flag, incident_flag)
+                    #else:
+                    #    print(changekey, " is being executed")
+                else:
+                    print(endtimediff, "is not equal to the trigger conditions of hour checks for change ", changekey)
+                    self._logger.info(changekey)
+                    self._logger.info(endtimediff)
+                continue
+            else:
+                print("In else")
+                #added for TR Automation
+                print("Executing the change request for the first time")
+                #assign values to variables
+                planned_end_date = chg['end_date']
+                datesplit = planned_end_date.split('-')
+                year1 = datesplit[0]
+                month1 = datesplit[1]
+                day1 = datesplit[2].split(" ")[0]
+                hour1 = datesplit[2].split(" ")[1].split(":")[0]
+                minute1 = datesplit[2].split(" ")[1].split(":")[1]
+                print(year1, month1, day1)
+                planned_end_time = datetime(year=int(year1), month=int(month1), day=int(day1), hour=int(hour1), minute=int(minute1))
+                print(planned_end_date)
+                gmtcurrenttime = datetime.now(pytz.timezone('GMT'))
+                current_time_without_timezone = gmtcurrenttime.replace(tzinfo=None)
+                endtimediff = round((((planned_end_time - current_time_without_timezone).total_seconds())/3600),1)
+                print(endtimediff)
+                changekey = chg['number']
+                #lasttriggertime = str(current_time_without_timezone)
+                #conditions validation - put this in else part
+                if (endtimediff == 10.8 or endtimediff == 10.7 or endtimediff == 8 or endtimediff == 6 or endtimediff == 4 or endtimediff == 2 or (endtimediff <= 0.5 and endtimediff >= 0)):
+                    self._logger.info('Processing change request:' + chg['number'])
+                    processing_chg_requests.append(chg['number'])
+                    chg_str = str(processing_chg_requests)
+                    kvp = KeyValuePair(name=chg_st2_key, value=chg_str)
+                    self.st2_client.keys.update(kvp)
+                    #kvpchange = KeyValuePair(name=changekey, value=lasttriggertime)
+                    #self.st2_client.keys.update(kvpchange)
+                    print("Check description")
+                    if 0 <= endtimediff <= 0.5 and changekey not in processing_chg_requests_to_close :
+                        print("reached last iteration")
+                        processing_chg_requests_to_close.append(changekey)
+                        #end_trigger_flag = 1
+                    if endtimediff == 9:
+                        email_flag = 1
+                        incident_flag = 1
+                    if endtimediff == 12:
+                        email_flag = 1
+                    self.check_description(chg, end_trigger_flag, email_flag, incident_flag)
+                else:
+                    self._logger.info(changekey)
+                    self._logger.info(endtimediff)
+                    print(endtimediff, "is not equal to the trigger conditions of hour checks for change ", changekey)
+                    self._logger.info(endtimediff + 'is not equal to the trigger conditions of hour checks for change '+ changekey)
+
+    def get_company_and_ag_and_ciname(self, chg):
+        configuration_item_env = ''
+        if chg['assignment_group'] and chg['assignment_group']['link']:
+            response = self.base_action.sn_api_call(method='GET',
+                                                    url=chg['assignment_group']['link'])
+            assign_group = response['name']
+        else:
+            self._logger.info('Assignment Group not found for change: ' + chg['number'])
+            assign_group = ''
+
+        if chg['company'] and chg['company']['link']:
+            response = self.base_action.sn_api_call(method='GET',
+                                                   url=chg['company']['link'])
+            company = response['name']
+        else:
+            self._logger.info('Company not found for change: ' + chg['number'])
+            company = ''
+
+        if chg['cmdb_ci'] and chg['cmdb_ci']['link']:
+            response = self.base_action.sn_api_call(method='GET',
+                                                   url=chg['cmdb_ci']['link'])
+            configuration_item_name = response['name']
+            configuration_item_env = response['u_environment'].lower()
+        else:
+            self._logger.info('Company not found for change: ' + chg['number'])
+            configuration_item_name = ''
+
+        return assign_group, company,configuration_item_name,configuration_item_env
+
+    def betweenString(self,value, a, b):
+        # Find and validate before-part.
+        pos_a = value.find(a)
+        if pos_a == -1: return ""
+        # Find and validate after part.
+        pos_b = value.rfind(b)
+        if pos_b == -1: return ""
+        # Return middle part.
+        adjusted_pos_a = pos_a + len(a)
+        if adjusted_pos_a >= pos_b: return ""
+        return value[adjusted_pos_a:pos_b]
+
+    def afterString(self,value, a):
+        # Find and validate first part.
+        pos_a = value.rfind(a)
+        if pos_a == -1: return ""
+        # Returns chars after the found string.
+        adjusted_pos_a = pos_a + len(a)
+        if adjusted_pos_a >= len(value): return ""
+        return value[adjusted_pos_a:]
+
+    def beforeString(self,value, a):
+        # Find first part and return slice before it.
+        pos_a = value.find(a)
+        if pos_a == -1: return ""
+        return value[0:pos_a]
+
+    def check_description(self, chg, end_trigger_flag, email_flag, incident_flag):
+        desc = chg['description'].lower()
+        short_desc = chg['short_description']
+        assign_group, company, configuration_item_name, configuration_item_env = self.get_company_and_ag_and_ciname(chg)
+        if '[tr - automation]' in desc:
+            if assign_group == '':
+                #check_uptime = False
+                os_type = ''
+            else:
+                #check_uptime = True
+                os_type = 'windows' if 'intel' in assign_group.lower() else 'linux'
+            ci_address = self.check_ci_address(short_desc)
+        os_type = 'windows' if 'windows' in short_desc.lower() else 'linux'
+        #if ci_address == '':
+        ci_address = configuration_item_name
+        payload = {
+            'assignment_group': assign_group,
+            'ci_address': ci_address,
+            'os_type': os_type,
+            'configuration_item_name': configuration_item_name,
+            'configuration_item_env': configuration_item_env,
+            'customer_name': company,
+            'detailed_desc': chg['description'],
+            'change_id': chg['number'],
+            'change_sys_id': chg['sys_id'],
+            'short_desc': chg['short_description'],
+            'planned_start_date': chg['start_date'],
+            'planned_end_date': chg['end_date'],
+            'end_trigger_flag': end_trigger_flag,
+            'email_flag': email_flag,
+            'incident_flag': incident_flag
+            }
+        print("Payload data is: {}".format(payload))
+        self._sensor_service.dispatch(trigger='ntt_itsm.recurring_patch_validation', payload=payload)
+
+    def check_ci_address(self, short_desc):
+        ip_check = re.compile('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+        ip_format = re.findall(ip_check, short_desc)
+        ip_value = []
+        ip_address = ''
+
+        for i in ip_format:
+            test = i.split('.')
+            if len(test) == 4:
+                for j in test:
+                    if (int(j) >= 0) and (int(j) < 256):
+                        ip_value.append(j)
+        if len(ip_value) == 4:
+            ip_address = self.convert_list_to_string(ip_value)
+        return ip_address
+
+
+    def convert_list_to_string(self, list_elements):
+        string_value = ""
+        cnt = 0
+        for item in list_elements:
+            if cnt == 0:
+                string_value += item
+            else:
+                string_value += '.'+item
+            cnt += 1
+        return string_value
+
+
+    def cleanup(self):
+        pass
+    def add_trigger(self, trigger):
+        pass
+    def update_trigger(self, trigger):
+        pass
+    def remove_trigger(self, trigger):
+        pass
+
