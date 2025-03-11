@@ -1,6 +1,7 @@
 
 Clarios API key : e0528c55-2625-41d1-b0ca-8fdcacf7b819
 10941
+headers = {'Authorization': 'Bearer <access_token>' ,'Accept': 'application/json','Content-type': 'application/json'}
 
 
 08/08
